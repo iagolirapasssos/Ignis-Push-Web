@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>IgnisPush Web Client</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #020617;
+      color: #e5e7eb;
+      padding: 20px;
+      max-width: 700px;
+      margin: auto;
+    }
+
+    h1 { color: #f97316; }
+
+    label {
+      display: block;
+      margin-top: 12px;
+      font-size: 14px;
+    }
+
+    input {
+      width: 100%;
+      padding: 8px;
+      margin-top: 4px;
+      border-radius: 6px;
+      border: none;
+      background: #0f172a;
+      color: #fff;
+      box-sizing: border-box;
+    }
+
+    button {
+      margin-top: 16px;
+      margin-right: 8px;
+      padding: 10px 14px;
+      border-radius: 6px;
+      border: none;
+      background: #f97316;
+      color: #fff;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #ea580c;
+    }
+
+    .log {
+      margin-top: 20px;
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      padding: 10px;
+      max-height: 400px;
+      overflow-y: auto;
+      font-size: 14px;
+    }
+
+    .notif {
+      border-bottom: 1px solid #1e293b;
+      padding: 10px 0;
+    }
+
+    .notif:last-child {
+      border-bottom: none;
+    }
+
+    .notif img {
+      max-width: 100%;
+      margin-top: 8px;
+      border-radius: 6px;
+    }
+
+    .status {
+      margin-top: 10px;
+      font-size: 13px;
+      color: #94a3b8;
+    }
+
+    .status strong {
+      color: #e5e7eb;
+    }
+
+    .polling-status {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+
+    .polling-active {
+      background: #22c55e;
+      color: #fff;
+    }
+
+    .polling-inactive {
+      background: #ef4444;
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+
+<h1>IgnisPush Web Client</h1>
+
+<label>App Key</label>
+<input id="appKey" placeholder="app_xxxxxxxxxxxxx" />
+
+<button id="start">Iniciar</button>
+<button id="stop">Parar</button>
+<button id="clear">Limpar Historico</button>
+
+<p class="status">
+  <strong>Player ID:</strong> <span id="playerId">---</span><br>
+  <strong>Status:</strong> <span id="pollingStatus" class="polling-status polling-inactive">Parado</span>
+</p>
+
+<h3>Notificacoes Recebidas</h3>
+<div class="log" id="log"><em>Nenhuma notificacao ainda...</em></div>
+
+<script>
+const API_BASE = 'https://ignispush.replit.app/api';
+
+class IgnisPush {
+  constructor(appKey) {
+    this.appKey = appKey;
+    this.baseURL = API_BASE;
+    this.pollInterval = 5000;
+    this.timer = null;
+    this.onNotification = null;
+    this.onStatusChange = null;
+  }
+
+  generateUUID() {
+    if (crypto.randomUUID) return crypto.randomUUID();
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random() * 16 | 0;
+      const v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  }
+
+  getDeviceId() {
+    let id = localStorage.getItem('ignispush_device_id');
+    if (!id) {
+      id = this.generateUUID();
+      localStorage.setItem('ignispush_device_id', id);
+    }
+    return id;
+  }
+
+  getDisplayedIds() {
+    return new Set(JSON.parse(localStorage.getItem('ignispush_displayed') || '[]'));
+  }
+
+  saveDisplayedIds(ids) {
+    localStorage.setItem('ignispush_displayed', JSON.stringify([...ids]));
+  }
+
+  clearDisplayedIds() {
+    localStorage.removeItem('ignispush_displayed');
+  }
+
+  async registerDevice() {
+    const res = await fetch(`${this.baseURL}/players`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        app_key: this.appKey,
+        push_token: `web-${this.getDeviceId()}`,
+        platform: 'web',
+        device_model: navigator.userAgent.substring(0, 50),
+        os_version: navigator.platform,
+        app_version: '1.0.0',
+        language: navigator.language,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(err);
+    }
+
+    const data = await res.json();
+    if (data.success && data.player_id) {
+      localStorage.setItem('ignispush_player_id', data.player_id);
+      return data.player_id;
+    } else {
+      throw new Error(data.error || 'Registro falhou');
+    }
+  }
+
+  startPolling() {
+    this.stopPolling();
+    this.check();
+    this.timer = setInterval(() => this.check(), this.pollInterval);
+    if (this.onStatusChange) this.onStatusChange(true);
+  }
+
+  stopPolling() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    if (this.onStatusChange) this.onStatusChange(false);
+  }
+
+  async check() {
+    const playerId = localStorage.getItem('ignispush_player_id');
+    if (!playerId) return;
+
+    try {
+      const res = await fetch(`${this.baseURL}/players/${playerId}/notifications`);
+      if (!res.ok) return;
+
+      const data = await res.json();
+      if (!data.success || !Array.isArray(data.notifications)) return;
+
+      const displayed = this.getDisplayedIds();
+
+      for (const n of data.notifications) {
+        if (!displayed.has(n.id)) {
+          this.showBrowserNotification(n.title, n.body, n.imageUrl);
+          displayed.add(n.id);
+          if (this.onNotification) this.onNotification(n);
+        }
+      }
+
+      this.saveDisplayedIds(displayed);
+    } catch (err) {
+      console.error('Polling error:', err);
+    }
+  }
+
+  async showBrowserNotification(title, body, imageUrl) {
+    if (!('Notification' in window)) return;
+    
+    if (Notification.permission === 'default') {
+      await Notification.requestPermission();
+    }
+    
+    if (Notification.permission === 'granted') {
+      const options = { body };
+      if (imageUrl) {
+        options.image = imageUrl;
+        options.icon = imageUrl;
+      }
+      new Notification(title, options);
+    }
+  }
+}
+
+/* UI */
+let ignis = null;
+
+const appKeyInput = document.getElementById('appKey');
+const log = document.getElementById('log');
+const playerSpan = document.getElementById('playerId');
+const pollingStatus = document.getElementById('pollingStatus');
+
+appKeyInput.value = localStorage.getItem('ignispush_appkey') || '';
+
+const savedPlayerId = localStorage.getItem('ignispush_player_id');
+if (savedPlayerId) {
+  playerSpan.textContent = savedPlayerId;
+}
+
+document.getElementById('start').onclick = async () => {
+  try {
+    const key = appKeyInput.value.trim();
+    if (!key) {
+      alert('Informe a App Key');
+      return;
+    }
+
+    localStorage.setItem('ignispush_appkey', key);
+
+    ignis = new IgnisPush(key);
+
+    ignis.onStatusChange = (active) => {
+      pollingStatus.textContent = active ? 'Ativo' : 'Parado';
+      pollingStatus.className = 'polling-status ' + (active ? 'polling-active' : 'polling-inactive');
+    };
+
+    ignis.onNotification = (n) => {
+      if (log.querySelector('em')) {
+        log.innerHTML = '';
+      }
+      const div = document.createElement('div');
+      div.className = 'notif';
+      let html = `<strong>${n.title}</strong><br>${n.body}`;
+      if (n.imageUrl) {
+        html += `<br><img src="${n.imageUrl}" alt="Imagem">`;
+      }
+      html += `<br><small style="color:#64748b">${new Date(n.sentAt).toLocaleString()}</small>`;
+      div.innerHTML = html;
+      log.prepend(div);
+    };
+
+    const playerId = await ignis.registerDevice();
+    playerSpan.textContent = playerId;
+
+    ignis.startPolling();
+    
+    if (Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  } catch (e) {
+    alert('Erro: ' + e.message);
+    console.error(e);
+  }
+};
+
+document.getElementById('stop').onclick = () => {
+  if (ignis) ignis.stopPolling();
+};
+
+document.getElementById('clear').onclick = () => {
+  localStorage.removeItem('ignispush_displayed');
+  log.innerHTML = '<em>Historico limpo. Novas notificacoes aparecerao aqui.</em>';
+};
+</script>
+
+</body>
+</html>
